@@ -1,0 +1,111 @@
+---
+title: "polling dashboard"
+author: "Conor Kelly"
+date: "8/23/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(googlesheets4)
+library(lubridate)
+library(anytime)
+
+#######################################
+## read in polling data from 538's GitHub page (https://github.com/fivethirtyeight/data/tree/master/polls)
+## and 2016 election results (https://raw.githubusercontent.com/kshaffer/election2016/master/2016ElectionResultsByState.csv)
+#######################################
+
+polls2020_raw <- read_csv("https://projects.fivethirtyeight.com/2020-general-data/presidential_poll_averages_2020.csv")
+
+polls2016_raw <- read_csv("https://raw.githubusercontent.com/fivethirtyeight/data/master/polls/pres_pollaverages_1968-2016.csv")
+
+results2016_raw <- read_csv("https://raw.githubusercontent.com/kshaffer/election2016/master/2016ElectionResultsByState.csv")
+
+#######################################
+## clean 2016 results to get clinton margin
+#######################################
+
+results2016 <- results_2016_raw %>%
+  select(state, clintonVotes, trumpVotes, totalVotes) %>%
+  mutate(dem_final_margin = ((clintonVotes / totalVotes) - (trumpVotes / totalVotes)) * 100) %>%
+  select(state, dem_final_margin)
+
+#######################################
+## clean 2016 polls to get Clinton's averages by day
+#######################################
+
+polls2016 <- polls2016_raw %>%
+  select(cycle, state, modeldate, candidate_name, pct_estimate, pct_trend_adjusted, election_date) %>%
+  filter(cycle == 2016,
+         candidate_name %in% c("Donald Trump", "Hillary Rodham Clinton")) %>%
+  mutate(days_from_election = anydate(election_date) - anydate(modeldate),
+         candidate_name = if_else(candidate_name == "Donald Trump", "trump16", "clinton")) %>%
+  
+  # pivot wider to keep one row for each state and date
+  pivot_wider(id_cols = c(days_from_election, state, modeldate),
+              names_from = c(candidate_name),
+              values_from = c(pct_estimate, pct_trend_adjusted)) %>%
+  
+  # get clinton margin
+  mutate(clinton_margin = pct_estimate_clinton - pct_estimate_trump16,
+         clinton_margin_adjusted = pct_trend_adjusted_clinton - pct_trend_adjusted_trump16) %>%
+  
+  # take values 150 days from the election or less
+  filter(days_from_election <= 150)
+
+#######################################
+ ## clean 2020 polls to get Biden's averages by day 
+#######################################
+
+polls2020 <- polls2020_raw %>%
+  select(cycle, state, modeldate, candidate_name, pct_estimate, pct_trend_adjusted) %>%
+  filter(cycle == 2020,
+  candidate_name %in% c("Donald Trump", "Joseph R. Biden Jr.")) %>%
+  mutate(election_date = "2020-11-03",
+         days_from_election = anydate(election_date) - anydate(modeldate),
+         candidate_name = if_else(candidate_name == "Donald Trump", "trump20", "biden")) %>%
+
+  # pivot wider to keep one row for each state and date
+  pivot_wider(id_cols = c(days_from_election, state, modeldate),
+              names_from = c(candidate_name),
+              values_from = c(pct_estimate, pct_trend_adjusted)) %>%
+  
+  # get biden margin
+  mutate(biden_margin = pct_estimate_biden - pct_estimate_trump20,
+         biden_margin_adjusted = pct_trend_adjusted_biden - pct_trend_adjusted_trump20) %>%
+  
+  # take values 150 days from the election or less
+  filter(days_from_election <= 150)
+
+#######################################  
+## merge together by state and days until election
+#######################################
+polls <- left_join(polls2016, polls2020, by = c("state", "days_from_election")) %>%
+  rename(date2016 = modeldate.x,
+         date2020 = modeldate.y)
+
+# add 2016 election result
+final <- left_join(polls, results2016, by = "state") %>%
+  
+  # order final dataset
+  select(state, days_from_election, clinton_margin, biden_margin, pct_trend_adjusted_clinton, pct_trend_adjusted_biden, everything()) %>%
+  
+  # final tweaks for Tableau
+  mutate(days_from_election = as.numeric(days_from_election)) %>%
+  
+  group_by(state) %>%
+  mutate(max_date_ind = if_else(anydate(date2020) == max(anydate(date2020)), 1, 0))
+
+#######################################  
+## write dataset to Google Sheet
+#######################################
+
+sheet_write(final, ss = "https://docs.google.com/spreadsheets/d/13alWemxRosNIc8Gm3-Hq-Z0c4QXj10erhuCLJqsZ1nk/edit#gid=0", sheet = "Sheet1")
+
+
+```
+
+
