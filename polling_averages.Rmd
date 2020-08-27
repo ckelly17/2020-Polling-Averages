@@ -28,10 +28,12 @@ results2016_raw <- read_csv("https://raw.githubusercontent.com/kshaffer/election
 ## clean 2016 results to get clinton margin
 #######################################
 
-results2016 <- results_2016_raw %>%
+results2016 <- results2016_raw %>%
   select(state, clintonVotes, trumpVotes, totalVotes) %>%
-  mutate(dem_final_margin = ((clintonVotes / totalVotes) - (trumpVotes / totalVotes)) * 100) %>%
-  select(state, dem_final_margin)
+  mutate(dem_final_margin = ((clintonVotes / totalVotes) - (trumpVotes / totalVotes)) * 100,
+         election_result = ifelse(dem_final_margin > 0, paste0("Clinton +", round(dem_final_margin, 1)),
+                                  paste0("Trump +", round(abs(dem_final_margin), 1)))) %>%
+  select(state, dem_final_margin, election_result)
 
 #######################################
 ## clean 2016 polls to get Clinton's averages by day
@@ -49,9 +51,12 @@ polls2016 <- polls2016_raw %>%
               names_from = c(candidate_name),
               values_from = c(pct_estimate, pct_trend_adjusted)) %>%
   
-  # get clinton margin
+  # get clinton margin and adjusted to percentages
   mutate(clinton_margin = pct_estimate_clinton - pct_estimate_trump16,
-         clinton_margin_adjusted = pct_trend_adjusted_clinton - pct_trend_adjusted_trump16) %>%
+         clinton_margin_adjusted = pct_trend_adjusted_clinton - pct_trend_adjusted_trump16,
+         
+  # undecided / third party 
+          undecided16 = 100 - (pct_trend_adjusted_clinton + pct_trend_adjusted_trump16)) %>%
   
   # take values 150 days from the election or less
   filter(days_from_election <= 150)
@@ -75,7 +80,10 @@ polls2020 <- polls2020_raw %>%
   
   # get biden margin
   mutate(biden_margin = pct_estimate_biden - pct_estimate_trump20,
-         biden_margin_adjusted = pct_trend_adjusted_biden - pct_trend_adjusted_trump20) %>%
+         biden_margin_adjusted = pct_trend_adjusted_biden - pct_trend_adjusted_trump20,
+         
+  # undecided / third party 
+          undecided20 = 100 - (pct_trend_adjusted_biden + pct_trend_adjusted_trump20)) %>%
   
   # take values 150 days from the election or less
   filter(days_from_election <= 150)
@@ -94,10 +102,61 @@ final <- left_join(polls, results2016, by = "state") %>%
   select(state, days_from_election, clinton_margin, biden_margin, pct_trend_adjusted_clinton, pct_trend_adjusted_biden, everything()) %>%
   
   # final tweaks for Tableau
-  mutate(days_from_election = as.numeric(days_from_election)) %>%
-  
-  group_by(state) %>%
-  mutate(max_date_ind = if_else(anydate(date2020) == max(anydate(date2020)), 1, 0))
+  mutate(days_from_election = as.numeric(days_from_election),
+         
+  # dates
+         date2016 = anydate(date2016),
+         date2020 = anydate(date2020),
+         max_date_ind = if_else(date2020 == max(date2020, na.rm = TRUE), 1, 0))
+
+# add ec votes
+ec <- import("C:\\Users\\ckelly\\Documents\\2020 Polling Averages\\ec_votes.csv") %>%
+  rename(ec_votes = `number of votes`)
+
+final <- left_join(final, ec, by = "state")
+
+#######################################  
+## Calculate popular vote/EC split
+#######################################
+
+## most recent state  and national polls 
+state_margins <- final %>%
+  filter(max_date_ind == 1,
+         state != "National") %>%
+  select(state, biden_margin_adjusted, date2020, ec_votes)
+
+national_margins <- final %>%
+  filter(max_date_ind == 1,
+         state == "National") %>%
+  select(biden_margin_adjusted, date2020) %>%
+  rename(national_margin = biden_margin_adjusted)
+
+## add national margin
+margins <- left_join(state_margins, national_margins, by = "date2020")
+
+## elasticty score
+elasticity <- import("C:\\Users\\ckelly\\Documents\\2020 Polling Averages\\elasticity_scores_2020.xlsx") %>%
+  rename(state = State)
+
+# merge elasticity and ec votes
+margins <- left_join(margins, elasticity, by = "state")
+
+## calculate the swing in popular vote towards trump to make biden's margin even
+pop_EC_split <- margins %>%
+  mutate(trump_swing_to_flip = national_margin - ((national_margin - biden_margin_adjusted) * Elasticity),
+         biden_margin_even = national_margin - trump_swing_to_flip) %>%
+  group_by(date2020) %>%
+  mutate(trump_ec_votes = ifelse(biden_margin_adjusted <= 0, ec_votes, 0),
+         biden_ec_votes = ifelse(biden_margin_adjusted > 0, ec_votes, 0),
+         biden_total = sum(biden_ec_votes, na.rm = TRUE),
+         trump_total = sum(trump_ec_votes, na.rm = TRUE),
+         total = biden_total + trump_total) %>%
+  ungroup() %>%
+  mutate(tipping_pt_state = "Wisconsin") %>%
+  filter(state == tipping_pt_state) %>%
+  select(biden_margin_even)
+
+final <- bind_cols(final, pop_EC_split)
 
 #######################################  
 ## write dataset to Google Sheet
