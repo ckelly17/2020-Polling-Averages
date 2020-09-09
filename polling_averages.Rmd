@@ -12,6 +12,9 @@ library(tidyverse)
 library(googlesheets4)
 library(lubridate)
 library(anytime)
+library(rio)
+
+t1 <- now()
 
 #######################################
 ## read in polling data from 538's GitHub page (https://github.com/fivethirtyeight/data/tree/master/polls)
@@ -23,6 +26,8 @@ polls2020_raw <- read_csv("https://projects.fivethirtyeight.com/2020-general-dat
 polls2016_raw <- read_csv("https://raw.githubusercontent.com/fivethirtyeight/data/master/polls/pres_pollaverages_1968-2016.csv")
 
 results2016_raw <- read_csv("https://raw.githubusercontent.com/kshaffer/election2016/master/2016ElectionResultsByState.csv")
+
+all_polls_raw  <- read_csv("https://projects.fivethirtyeight.com/polls-page/president_polls.csv") 
 
 #######################################
 ## clean 2016 results to get clinton margin
@@ -152,17 +157,79 @@ pop_EC_split <- margins %>%
          trump_total = sum(trump_ec_votes, na.rm = TRUE),
          total = biden_total + trump_total) %>%
   ungroup() %>%
-  mutate(tipping_pt_state = "Wisconsin") %>%
+  mutate(tipping_pt_state = "Pennsylvania") %>%
   filter(state == tipping_pt_state) %>%
   select(biden_margin_even)
 
+
+
 final <- bind_cols(final, pop_EC_split)
+final <- left_join(final, elasticity, by = "state")
+
+#######################################  
+## get all individual polls
+#######################################
+
+
+all_polls <- all_polls_raw %>%
+  filter(candidate_name %in% c("Donald Trump", "Joseph R. Biden Jr.")) %>%
+  select(poll_id, pollster, sponsors, pct, candidate_name, start_date, end_date, state, display_name, population_full) %>%
+  
+  # take first value for pct by poll and population
+  group_by(poll_id, candidate_name) %>%
+  filter(pct == first(pct)) %>%
+  
+  # reshape
+  mutate(candidate_name = if_else(candidate_name == "Donald Trump", "trump", "biden")) %>%
+  pivot_wider(id_cols = c(poll_id, sponsors, pollster, state, display_name, population_full, end_date, start_date),
+              names_from = c(candidate_name),
+              values_from = c(pct)) %>%
+  
+  # dates
+  mutate(start_date = anydate(paste0(start_date, "20")),
+         end_date = anydate(paste0(start_date, "20")),
+         days_from_election = as.Date("2020-11-03") - end_date) %>%
+  filter(days_from_election < 150) %>%
+  
+  # remove duplicates
+  distinct(poll_id, .keep_all = TRUE)
+         
+
+# count the number of actual polls in the week and month
+count <- all_polls %>%
+  filter(days_from_election < 150) %>%
+  group_by(poll_id) %>%
+  mutate(first = row_number()) %>%
+  filter(first == 1) %>%
+  select(poll_id, display_name, days_from_election, state, end_date, first) %>%
+  mutate(state = if_else(is.na(state), "National", state),
+         last_2weeks = if_else(today() - (end_date +3) <= 14, 1, 0),
+         last_month = if_else(today() - (end_date +3) <= 31, 1, 0)) %>%
+  
+  group_by(state) %>%
+    
+    summarize(polls_last_2wk = sum(last_2weeks),
+              polls_last_month = sum(last_month),
+              n_polls = sum(first))
+
+# join
+final <- left_join(final, count, by = "state") %>%
+  mutate(n_polls = ifelse(is.na(n_polls), 0, n_polls),
+         polls_last_2wk = ifelse(is.na(polls_last_2wk), 0, polls_last_2wk),
+         polls_last_month = ifelse(is.na(polls_last_month), 0, polls_last_month),
+         time_stamp = Sys.time(),
+         time_stamp = paste0(format(time_stamp, format = "%I:%M %p", tz="America/New_York"), " ", format(Sys.Date(), format = "%B %d %Y")))
+         
+## export polls
+export(final, "C:\\Users\\ckelly\\Documents\\2020 Polling Averages\\2016-2020 polling averages.csv")
 
 #######################################  
 ## write dataset to Google Sheet
 #######################################
 
-sheet_write(final, ss = "https://docs.google.com/spreadsheets/d/13alWemxRosNIc8Gm3-Hq-Z0c4QXj10erhuCLJqsZ1nk/edit#gid=0", sheet = "Sheet1")
+print(now() - t1)
+
+# sheet_write(final, ss = "https://docs.google.com/spreadsheets/d/13alWemxRosNIc8Gm3-Hq-Z0c4QXj10erhuCLJqsZ1nk/edit#gid=0", sheet = "Sheet1")
 
 
 ```
